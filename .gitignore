@@ -1,0 +1,29 @@
+# Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# PyInstaller & Build artifacts
+build/
+dist/
+*.spec
+
+# Test & Debug scratch files
+test_*.py
+debug_*.py
+inspect_*.py
+check_*.py
+*.log
+*.tmp
+local_browsers/
+.local-browsers/
+
+# Output Excel data files
+*.xlsx
+*.csv
+
+# Local settings
+config.json
