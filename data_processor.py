@@ -44,23 +44,46 @@ class DataProcessor:
         output_path: str,
         category_filter: str = "Tutti",
         province_filter: Optional[str] = None,
-        split_by_province: bool = True
+        split_by_province: bool = True,
+        allowed_regions: Optional[List[str]] = None
     ) -> Optional[str]:
         if not leads:
             print("Nessun lead da salvare.")
             return None
 
+        from utils.geo_utils import get_region_province_codes
+        valid_provs_for_regions = set()
+        if allowed_regions:
+            for r in allowed_regions:
+                valid_provs_for_regions.update(get_region_province_codes(r))
+
         # Assicura che ogni lead abbia la Provincia valorizzata prima del DataFrame
+        clean_leads = []
         for item in leads:
-            if not item.get("Provincia"):
-                item["Provincia"] = extract_province(
+            p = item.get("Provincia", "")
+            r = item.get("Regione", "")
+            if not p or (valid_provs_for_regions and p.upper() not in valid_provs_for_regions):
+                p = extract_province(
                     str(item.get("Citta", "")),
                     str(item.get("Indirizzo", "")),
-                    str(item.get("Regione", ""))
+                    str(r)
                 )
+                if p:
+                    item["Provincia"] = p
+
+            # Se ci sono regioni specificate, scarta i lead con provincia fuori regione
+            if valid_provs_for_regions and item.get("Provincia") and item.get("Provincia").upper() not in valid_provs_for_regions:
+                continue
+
             # Pulisci eventuale "(XX)" ridondante dal campo Citta
             if item.get("Citta"):
                 item["Citta"] = re.sub(r'\s*\([A-Za-z]{2}\)\s*$', '', str(item["Citta"])).strip()
+            clean_leads.append(item)
+
+        leads = clean_leads
+        if not leads:
+            print("Nessun lead corrispondente ai filtri geografici.")
+            return None
 
         df = pd.DataFrame(leads)
 

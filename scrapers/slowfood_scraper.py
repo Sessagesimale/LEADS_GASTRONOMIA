@@ -243,8 +243,24 @@ class SlowFoodScraper(BaseScraper):
                     if p_cand and not prov:
                         prov = p_cand
 
+            # Ignora blocchi che non contengono alcun contatto (telefono, email o sito) e non hanno indirizzo civico
+            has_contact = bool(phone or email or website or re.search(r'(?:tel|cell|\+39|0\d{2,4}|3\d{2})\s*[\d\.\-\s]{5,}', full_block_txt, re.I))
+            if not has_contact:
+                continue
+
+            # Se non abbiamo né città né provincia né telefono, non è una scheda azienda valida
+            if not phone and not email and (not city or not address):
+                continue
+
             if not prov:
                 prov = extract_province(city, f"{address} {full_block_txt}", region)
+
+            # Se la regione è specificata e la provincia del produttore non appartiene a tale regione,
+            # scartalo (es. Presidi multiregionali che includono produttori di regioni confinanti)
+            from utils.geo_utils import get_region_province_codes
+            valid_provs = get_region_province_codes(region) if region else []
+            if valid_provs and prov and prov.upper() not in [p.upper() for p in valid_provs]:
+                continue
 
             lead = {
                 "Nome": company_name,
@@ -319,6 +335,11 @@ class SlowFoodScraper(BaseScraper):
                     chef_txt = chef_el.get_text(" ", strip=True) if chef_el else ""
 
                     prov = extract_province(city, address, region)
+                    from utils.geo_utils import get_region_province_codes
+                    valid_provs = get_region_province_codes(region) if region else []
+                    # Se la regione è specificata, accetta solo ristoranti la cui provincia ricada nelle province della regione
+                    if valid_provs and (not prov or prov.upper() not in [p.upper() for p in valid_provs]):
+                        continue
 
                     lead = {
                         "Nome": name,

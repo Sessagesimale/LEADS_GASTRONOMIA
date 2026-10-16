@@ -593,12 +593,36 @@ class App(ctk.CTk):
             self.after(0, lambda: self.btn_run.configure(state="normal"))
             return
 
-        # Pre-filtraggio per provincia e deduplicazione rapida prima dell'arricchimento Bilanci/Social
-        if province_code:
-            all_leads = [
-                l for l in all_leads
-                if not l.get("Provincia") or l.get("Provincia", "").upper() == province_code.upper()
-            ]
+        # Pre-filtraggio geografico rigoroso per Regione e Provincia
+        from utils.geo_utils import get_region_province_codes
+        valid_region_prov_map = {reg: set(get_region_province_codes(reg)) for reg in regions}
+        all_allowed_provs = set()
+        for p_set in valid_region_prov_map.values():
+            all_allowed_provs.update(p_set)
+
+        filtered_geo_leads = []
+        for l in all_leads:
+            l_prov = (l.get("Provincia") or "").upper().strip()
+            l_reg = l.get("Regione", "")
+
+            # Se la provincia è ancora vuota o non valida, tenta ri-estrazione con la regione del lead
+            if not l_prov or (all_allowed_provs and l_prov not in all_allowed_provs):
+                l_prov = extract_province(l.get("Citta", ""), l.get("Indirizzo", ""), l_reg)
+                if l_prov:
+                    l["Provincia"] = l_prov
+
+            # Se province_code è selezionato (es. 'PZ'), accetta solo quella provincia
+            if province_code:
+                if l_prov != province_code.upper():
+                    continue
+            else:
+                # Se è 'Tutte le Province' della/e regione/i selezionate, scarta i lead che cadono fuori regione
+                if all_allowed_provs and l_prov and l_prov not in all_allowed_provs:
+                    continue
+
+            filtered_geo_leads.append(l)
+
+        all_leads = filtered_geo_leads
 
         unique_leads = []
         seen_keys = set()
@@ -651,7 +675,8 @@ class App(ctk.CTk):
                     full_path,
                     category_filter=category_filter,
                     province_filter=province_code,
-                    split_by_province=split_prov
+                    split_by_province=split_prov,
+                    allowed_regions=regions
                 )
                 if saved_path:
                     self.update_status(f"Completato! Salvati lead qualificati in {os.path.basename(saved_path)}.")

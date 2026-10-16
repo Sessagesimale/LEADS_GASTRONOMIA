@@ -262,58 +262,111 @@ KNOWN_MUNICIPALITIES = {
 }
 
 
+import os
+import json
+
+# Caricamento del database completo dei Comuni Italiani (7.900+ comuni ISTAT)
+_COMUNI_DB: Dict[str, list] = {}
+def _load_comuni_db():
+    global _COMUNI_DB
+    if _COMUNI_DB:
+        return _COMUNI_DB
+    db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "comuni_db.json")
+    if os.path.exists(db_path):
+        try:
+            with open(db_path, "r", encoding="utf-8") as f:
+                _COMUNI_DB = json.load(f)
+        except Exception:
+            _COMUNI_DB = {}
+    return _COMUNI_DB
+
+def get_region_province_codes(region: str) -> List[str]:
+    """Restituisce le sigle delle province appartenenti alla regione (es. Basilicata -> ['MT', 'PZ'])."""
+    return [p["code"] for p in REGION_PROVINCES.get(region, [])]
+
 def extract_province(city: str = "", address: str = "", region: str = "") -> str:
     """
-    Estrae la sigla della provincia (es. 'PR', 'VT', 'AO', 'MI') combinando:
-    1. Sigla esplicita tra parentesi o dopo trattino, es. 'Proceno (Vt)' o '41121 Modena (MO)'
-    2. CAP a 5 cifre presente nell'indirizzo o nella città
-    3. Match del nome del comune / capoluogo di provincia
-    4. Fallback regionale se regione mono-provincia (es. Valle d'Aosta -> AO)
+    Estrae con accuratezza la sigla della provincia (es. 'PR', 'VT', 'PZ', 'MT', 'MI') combinando:
+    1. Sigla esplicita tra parentesi o fine stringa es. '(VT)', 'Proceno (Vt)' o 'Bernalda (MT)'
+    2. Lookup nel database completo dei 7.900+ Comuni Italiani ISTAT (priorità alla regione richiesta)
+    3. CAP a 5 cifre presente nell'indirizzo o nella città
+    4. Match del nome del comune / capoluogo di provincia
+    5. Fallback regionale per regioni mono-provincia (es. Valle d'Aosta -> AO)
     """
     combined = f"{city} {address}".strip()
+    valid_region_provs = set(get_region_province_codes(region)) if region else set()
 
-    # 1. Cerca sigla tra parentesi es. (VT), (Vt), (AO), (PR)
+    # 1. Cerca sigla tra parentesi es. (VT), (Vt), (AO), (MT)
     paren_matches = re.findall(r'\(([A-Za-z]{2})\)', combined)
+    for m in paren_matches:
+        code = m.upper()
+        if code in VALID_PROVINCE_CODES:
+            # Se è specificata una regione e la sigla appartiene alla regione, match immediato
+            if not valid_region_provs or code in valid_region_provs:
+                return code
+
+    # 2. Pulizia del nome città e lookup nei 7.900+ Comuni Italiani
+    clean_city = re.sub(r'\([A-Za-z]{2}\)', '', str(city)).strip().lower()
+    clean_city = re.sub(r'^\b\d{5}\b\s*', '', clean_city).strip()
+    clean_city = clean_city.replace("it-", "").replace("-", " ").strip()
+    clean_city = re.sub(r'^(?:comune\s+di|città\s+di|frazione\s+di)\s+', '', clean_city)
+
+    db = _load_comuni_db()
+    if clean_city in db:
+        c_code, c_reg = db[clean_city]
+        if not valid_region_provs or c_code in valid_region_provs:
+            return c_code
+
+    # Match diretto con capoluogo di provincia (es. Potenza, Matera, Parma)
+    if clean_city in NAME_TO_PROVINCE_CODE:
+        code = NAME_TO_PROVINCE_CODE[clean_city]
+        if not valid_region_provs or code in valid_region_provs:
+            return code
+
+    if clean_city in KNOWN_MUNICIPALITIES:
+        code = KNOWN_MUNICIPALITIES[clean_city]
+        if not valid_region_provs or code in valid_region_provs:
+            return code
+
+    # 3. Cerca CAP a 5 cifre nell'indirizzo o città
+    cap_matches = re.findall(r'\b([0-9]{5})\b', combined)
+    for cap in cap_matches:
+        for prefix_len in (4, 3, 2):
+            pref = cap[:prefix_len]
+            if pref in CAP_PREFIX_TO_PROVINCE:
+                cap_prov = CAP_PREFIX_TO_PROVINCE[pref]
+                if not valid_region_provs or cap_prov in valid_region_provs:
+                    return cap_prov
+
+    # 4. Cerca sottostringa comune noto o provincia dentro city (evitando falsi positivi da "Via Roma" nell'indirizzo)
+    if clean_city and len(clean_city) >= 3:
+        for muni, info in db.items():
+            if len(muni) >= 4 and re.search(rf'\b{re.escape(muni)}\b', clean_city):
+                c_code, c_reg = info
+                if not valid_region_provs or c_code in valid_region_provs:
+                    return c_code
+
+    # Cerca nel testo solo se corrisponde a una provincia valida della regione richiesta
+    combined_lower = combined.lower()
+    if valid_region_provs:
+        for pname, code in NAME_TO_PROVINCE_CODE.items():
+            if code in valid_region_provs and len(pname) > 4 and re.search(rf'\b{re.escape(pname)}\b', combined_lower):
+                return code
+
+    # 5. Cerca sigla provincia isolata a fine stringa (es. "Modena MO", "Bernalda MT")
+    end_code = re.search(r'\b([A-Z]{2})\s*$', combined.strip())
+    if end_code and end_code.group(1) in VALID_PROVINCE_CODES:
+        cand = end_code.group(1)
+        if not valid_region_provs or cand in valid_region_provs:
+            return cand
+
+    # Se avevamo parentesi anche fuori regione ma nessun match regionale trovato
     for m in paren_matches:
         code = m.upper()
         if code in VALID_PROVINCE_CODES:
             return code
 
-    # 2. Cerca CAP a 5 cifre nell'indirizzo o città
-    cap_matches = re.findall(r'\b([0-9]{5})\b', combined)
-    for cap in cap_matches:
-        if cap[:4] in CAP_PREFIX_TO_PROVINCE:
-            return CAP_PREFIX_TO_PROVINCE[cap[:4]]
-        if cap[:3] in CAP_PREFIX_TO_PROVINCE:
-            return CAP_PREFIX_TO_PROVINCE[cap[:3]]
-        if cap[:2] in CAP_PREFIX_TO_PROVINCE:
-            return CAP_PREFIX_TO_PROVINCE[cap[:2]]
-
-    # 3. Cerca match diretto con capoluogo di provincia o comune noto
-    clean_city = re.sub(r'\([A-Za-z]{2}\)', '', str(city)).strip().lower()
-    clean_city = re.sub(r'^\b\d{5}\b\s*', '', clean_city).strip()
-    clean_city = clean_city.replace("it-", "").replace("-", " ").strip()
-
-    if clean_city in NAME_TO_PROVINCE_CODE:
-        return NAME_TO_PROVINCE_CODE[clean_city]
-    if clean_city in KNOWN_MUNICIPALITIES:
-        return KNOWN_MUNICIPALITIES[clean_city]
-
-    # Cerca sottostringa comune noto o provincia dentro city o address
-    combined_lower = combined.lower()
-    for muni, code in KNOWN_MUNICIPALITIES.items():
-        if re.search(rf'\b{re.escape(muni)}\b', combined_lower):
-            return code
-    for pname, code in NAME_TO_PROVINCE_CODE.items():
-        if len(pname) > 3 and re.search(rf'\b{re.escape(pname)}\b', combined_lower):
-            return code
-
-    # 4. Cerca sigla provincia isolata a fine stringa (es. "Modena MO")
-    end_code = re.search(r'\b([A-Z]{2})\s*$', combined.strip())
-    if end_code and end_code.group(1) in VALID_PROVINCE_CODES:
-        return end_code.group(1)
-
-    # 5. Fallback per regione mono-provincia o prima provincia se regione nota
+    # 6. Fallback per regione mono-provincia
     if region:
         provs = REGION_PROVINCES.get(region, [])
         if len(provs) == 1:

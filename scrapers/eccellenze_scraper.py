@@ -80,8 +80,14 @@ class EccellenzeScraper(BaseScraper):
                         if m_city:
                             city = m_city.group(1).strip()
 
-                        detected_prov = extract_province(city, address, region) or prov_code
-                        if province_filter and detected_prov and detected_prov.upper() != province_filter.upper():
+                        detected_prov = extract_province(city, address, region)
+                        # Se PagineGialle restituisce un'azienda fuori provincia/regione (es. nelle vicinanze), scartala rigorosamente
+                        if detected_prov and detected_prov.upper() != prov_code.upper():
+                            continue
+                        if not detected_prov:
+                            detected_prov = prov_code
+
+                        if province_filter and detected_prov.upper() != province_filter.upper():
                             continue
 
                         dedup_key = f"{name_low}_{city.lower()}"

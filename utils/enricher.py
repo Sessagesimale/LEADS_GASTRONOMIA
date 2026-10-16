@@ -185,60 +185,80 @@ class PhoneEnricher:
         clean_name = re.sub(r'\s*\([^)]*\)', '', name).strip()
         clean_city = re.sub(r'\s*\([^)]*\)', '', city).strip()
 
+        # Stop words comuni nelle ragioni sociali per calcolare l'affinità nominale
+        stop_words = {
+            'srl', 'spa', 'snc', 'sas', 'srls', 'di', 'e', 'il', 'la', 'le', 'lo', 'i', 'gli',
+            'del', 'della', 'dei', 'delle', 'ristorante', 'osteria', 'trattoria', 'bar', 'da',
+            'societa', 'cooperativa', 'agricola', 'azienda', 'supermercato', 'market', 'sapori'
+        }
+        lead_tokens = [w for w in re.findall(r'[a-zA-Z]{3,}', clean_name.lower()) if w not in stop_words]
+
         try:
-            # Passo A: Se non abbiamo la P.IVA, cerchiamo "{Nome} {Citta} Partita IVA"
+            # Passo A: Se non abbiamo già la P.IVA, cerchiamo su Yahoo con query mirata
             if not piva:
-                q1 = urllib.parse.quote(f"{clean_name} {clean_city} Partita IVA")
+                q1 = urllib.parse.quote(f"ufficiocamerale \"{clean_name}\" {clean_city}")
                 r1 = cffi_requests.get(f"https://it.search.yahoo.com/search?p={q1}", impersonate="chrome", timeout=6)
                 if r1.status_code == 200:
                     unquoted = urllib.parse.unquote(r1.text)
-                    # Cerca eventuale link diretto a ufficiocamerale
                     uc_matches = re.findall(r'https?://www\.ufficiocamerale\.it/\d+/[a-z0-9\-]+', unquoted)
                     if uc_matches:
                         uc_url = uc_matches[0]
 
-                    # Cerca P.IVA valide nel testo dei risultati
-                    plain1 = BeautifulSoup(r1.text, "html.parser").get_text(" ", strip=True)
-                    for cand in re.findall(r'\b([0-9]{11})\b', plain1):
-                        if ResilientExtractor.is_valid_italian_piva(cand):
-                            piva = cand
-                            lead["Partita IVA"] = piva
-                            break
-
-            # Passo B: Cerchiamo la scheda su UfficioCamerale tramite P.IVA (più preciso) o Nome + Città
+            # Passo B: Se ancora non abbiamo uc_url, cerchiamo per Nome + Città + Partita IVA
             if not uc_url:
-                terms = [piva, f"{piva} fatturato"] if piva else [f"ufficiocamerale {clean_name} {clean_city}"]
-                for search_term in terms:
-                    q2 = urllib.parse.quote(search_term)
+                search_terms = []
+                if piva:
+                    search_terms.append(f"{piva} ufficiocamerale")
+                else:
+                    search_terms.append(f"site:ufficiocamerale.it {clean_name} {clean_city}")
+
+                for st in search_terms:
+                    q2 = urllib.parse.quote(st)
                     r2 = cffi_requests.get(f"https://it.search.yahoo.com/search?p={q2}", impersonate="chrome", timeout=6)
                     if r2.status_code == 200:
                         unquoted2 = urllib.parse.unquote(r2.text)
-                        uc_matches = re.findall(r'https?://www\.ufficiocamerale\.it/\d+/[a-z0-9\-]+', unquoted2)
-                        if uc_matches:
-                            uc_url = uc_matches[0]
+                        uc_matches2 = re.findall(r'https?://www\.ufficiocamerale\.it/\d+/[a-z0-9\-]+', unquoted2)
+                        if uc_matches2:
+                            uc_url = uc_matches2[0]
                             break
 
-            # Passo C: Se abbiamo trovato l'URL di UfficioCamerale, estraiamo Fatturato, Utile, Addetti e Anno
+            # Passo C: Se abbiamo un URL UfficioCamerale, verifichiamo rigorosamente pertinenza geografica e nominale
             if uc_url:
                 r_uc = cffi_requests.get(uc_url, impersonate="chrome", timeout=6)
                 if r_uc.status_code == 200:
                     uc_text = BeautifulSoup(r_uc.text, "html.parser").get_text(" ", strip=True)
 
-                    # Verifica coerenza geografica se non avevamo già la P.IVA dal sito ufficiale
                     cam_match = re.search(r'Camera di commercio:\s*([A-Z]{2})\b', uc_text)
-                    addr_uc_match = re.search(r'Indirizzo:\s*(.+?)(?:Rea:|PEC:|Fatturato:|Dipendenti|Forma giuridica:)', uc_text)
                     uc_prov = cam_match.group(1).strip() if cam_match else ""
 
-                    # Se avevamo una provincia diversa, verifichiamo che almeno città o nome combacino
-                    is_coherent = True
-                    if prov and uc_prov and prov != uc_prov and not lead.get("Partita IVA"):
-                        if clean_city and clean_city.lower() not in uc_text.lower():
-                            is_coherent = False
+                    rag_match = re.search(r'Rag\.\s*Sociale:\s*(.+?)(?:Indirizzo:|Partita|Rea:|PEC:|$)', uc_text)
+                    rag_sociale = rag_match.group(1).strip() if rag_match else ""
+                    rag_tokens = [w for w in re.findall(r'[a-zA-Z]{3,}', rag_sociale.lower()) if w not in stop_words]
 
-                    if is_coherent:
+                    # 1. Verifica Coerenza Geografica:
+                    # Se il lead ha una provincia nota (es. MT) e UfficioCamerale indica una CCIAA diversa (es. BO o TO),
+                    # scartiamo immediatamente per evitare di associare multinazionali o omonimi distanti.
+                    is_geo_ok = True
+                    if prov and uc_prov:
+                        if prov.upper() != uc_prov.upper():
+                            is_geo_ok = False
+                    elif clean_city:
+                        # Se una delle due province manca, verifichiamo che la città compaia nell'indirizzo
+                        if clean_city.lower() not in uc_text.lower():
+                            is_geo_ok = False
+
+                    # 2. Verifica Coerenza Nominale:
+                    # La ragione sociale deve condividere almeno un termine distintivo col nome dell'attività
+                    is_name_ok = True
+                    if lead_tokens and rag_tokens:
+                        common_words = set(lead_tokens) & set(rag_tokens)
+                        if not common_words:
+                            is_name_ok = False
+
+                    if is_geo_ok and is_name_ok:
                         # Partita IVA da UfficioCamerale
                         m_piva = re.search(r'Partita IVA:\s*([0-9]{11})', uc_text)
-                        if m_piva and not lead.get("Partita IVA"):
+                        if m_piva:
                             lead["Partita IVA"] = m_piva.group(1)
 
                         # Provincia da UfficioCamerale se mancante
@@ -246,6 +266,7 @@ class PhoneEnricher:
                             lead["Provincia"] = uc_prov
 
                         # Indirizzo da UfficioCamerale se mancante
+                        addr_uc_match = re.search(r'Indirizzo:\s*(.+?)(?:Rea:|PEC:|Fatturato:|Dipendenti|Forma giuridica:)', uc_text)
                         if addr_uc_match and not lead.get("Indirizzo"):
                             lead["Indirizzo"] = addr_uc_match.group(1).strip()
 
