@@ -50,7 +50,11 @@ class EspressoScraper(BaseScraper):
                     website = f"https://{website}"
                     
                 address = (item.get('address') or '').strip()
-                city = item.get('location') or item.get('city') or item.get('province') or ''
+                city = str(item.get('location') or item.get('city') or '').strip()
+                raw_prov = str(item.get('province') or '').strip()
+                
+                from utils.geo_utils import extract_province
+                prov = extract_province(f"{city} ({raw_prov})" if raw_prov else city, address, region)
                 
                 slug = item.get('slug')
                 page_link = f"https://guideespresso.it/ristoranti/{slug}" if slug else "https://guideespresso.it"
@@ -58,8 +62,10 @@ class EspressoScraper(BaseScraper):
                 lead = {
                     "Nome": name,
                     "Tipologia": "Ristorante",
+                    "Regione": region,
+                    "Provincia": prov,
                     "Indirizzo": address,
-                    "Citta": str(city).strip(),
+                    "Citta": city,
                     "Telefono": phone,
                     "Email": email,
                     "Sito Web": website if website else page_link,
@@ -67,10 +73,7 @@ class EspressoScraper(BaseScraper):
                     "Fonte": self.source_name
                 }
                 
-                # Se manca il telefono, cerchiamo di arricchirlo
-                if not phone:
-                    lead = PhoneEnricher.enrich(lead, page)
-                    
+                lead = PhoneEnricher.enrich(lead, page)
                 leads.append(lead)
                 
         except Exception as e:

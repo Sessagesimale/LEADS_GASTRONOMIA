@@ -149,9 +149,13 @@ class GamberoRossoScraper(BaseScraper):
             if any(term in url_lower for term in shop_terms):
                 tipologia = "Negozio / Gastronomia"
                 
+            from utils.geo_utils import extract_province
+            prov = extract_province(city, address)
+                
             lead = {
                 "Nome": name,
                 "Tipologia": tipologia,
+                "Provincia": prov,
                 "Indirizzo": address,
                 "Citta": city,
                 "Telefono": phone,
@@ -161,10 +165,7 @@ class GamberoRossoScraper(BaseScraper):
                 "Fonte": self.source_name
             }
             
-            # Se manca il telefono, arricchisci
-            if not phone:
-                lead = PhoneEnricher.enrich(lead, page)
-                
+            lead = PhoneEnricher.enrich(lead, page)
             return lead
         except Exception as e:
             print(f"Errore dettaglio {url}: {e}")

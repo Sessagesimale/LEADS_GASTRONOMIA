@@ -1,106 +1,154 @@
 import pandas as pd
-from typing import List, Dict
+from typing import List, Dict, Optional
 import os
+import re
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.utils import get_column_letter
+from utils.geo_utils import extract_province, CODE_TO_PROVINCE_NAME
+
 
 class DataProcessor:
     def __init__(self):
         pass
-        
-    def process_and_save(self, leads: List[Dict[str, str]], output_path: str, category_filter: str = "Tutti"):
+
+    def _style_worksheet(self, worksheet, df: pd.DataFrame):
+        """Applica stile intestazione, larghezza colonne automatica e menu a tendina su un foglio Excel."""
+        header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+        header_font = Font(color="FFFFFF", bold=True)
+
+        for cell in worksheet[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        for column_cells in worksheet.columns:
+            length = max(len(str(cell.value or "")) for cell in column_cells)
+            col_letter = column_cells[0].column_letter
+            worksheet.column_dimensions[col_letter].width = min(max(length + 3, 12), 52)
+
+        if "Esito Valutazione" in df.columns and len(df) > 0:
+            val_col_idx = df.columns.get_loc("Esito Valutazione") + 1
+            val_col_letter = get_column_letter(val_col_idx)
+            dv = DataValidation(
+                type="list",
+                formula1='"Da contattare,In trattativa,Cliente acquisito,Scartato - Non in target"',
+                allow_blank=True
+            )
+            worksheet.add_data_validation(dv)
+            dv.add(f"{val_col_letter}2:{val_col_letter}{max(len(df) + 50, 100)}")
+
+    def process_and_save(
+        self,
+        leads: List[Dict[str, str]],
+        output_path: str,
+        category_filter: str = "Tutti",
+        province_filter: Optional[str] = None,
+        split_by_province: bool = True
+    ) -> Optional[str]:
         if not leads:
             print("Nessun lead da salvare.")
             return None
-            
+
+        # Assicura che ogni lead abbia la Provincia valorizzata prima del DataFrame
+        for item in leads:
+            if not item.get("Provincia"):
+                item["Provincia"] = extract_province(
+                    str(item.get("Citta", "")),
+                    str(item.get("Indirizzo", "")),
+                    str(item.get("Regione", ""))
+                )
+            # Pulisci eventuale "(XX)" ridondante dal campo Citta
+            if item.get("Citta"):
+                item["Citta"] = re.sub(r'\s*\([A-Za-z]{2}\)\s*$', '', str(item["Citta"])).strip()
+
         df = pd.DataFrame(leads)
-        
-        # Filtro per escludere rigorosamente il perimetro dolciario (gelaterie, cremerie, cioccolaterie, pasticcerie, ecc.)
+
+        # 1. Filtro per escludere rigorosamente il perimetro dolciario
         sweet_terms = ["gelater", "cremer", "cioccolat", "pasticc", "dolc", "confett", "torron", "biscott"]
         pattern = "|".join(sweet_terms)
         df = df[~df["Nome"].astype(str).str.lower().str.contains(pattern, na=False, regex=True)]
-        
-        # Filtro Tipologia (Ristoranti vs Negozi/Altro)
+
+        # 2. Filtro Tipologia (Ristoranti vs Negozi/Altro)
         if "Tipologia" not in df.columns:
             df["Tipologia"] = "Ristorante"
-            
+
         if "ristoranti" in category_filter.lower() and "tutti" not in category_filter.lower() and "negozi" not in category_filter.lower():
-            df = df[df["Tipologia"].astype(str).str.lower() == "ristorante"]
+            df = df[df["Tipologia"].astype(str).str.lower().str.contains("ristorant|trattori|osteri", regex=True)]
         elif "negozi" in category_filter.lower() and "tutti" not in category_filter.lower():
-            df = df[df["Tipologia"].astype(str).str.lower() != "ristorante"]
-            
+            df = df[~df["Tipologia"].astype(str).str.lower().str.contains("^ristorante$", regex=True)]
+
+        # 3. Filtro Provincia opzionale
+        if province_filter:
+            prov_code = province_filter.strip().upper()
+            df = df[df["Provincia"].astype(str).str.upper() == prov_code]
+
         if df.empty:
             print("Nessun lead corrispondente ai filtri impostati.")
             return None
-        
-        # Pulizia e rimozione duplicati basati su Nome e Citta
-        df = df.drop_duplicates(subset=["Nome", "Citta"], keep="first")
-            
-        # Gestione Link: se Sito Web o Link Pagina sono vuoti, usa l'altro come fallback così il link è sempre presente
+
+        # 4. Rimozione duplicati basati su Nome e Citta (case-insensitive)
+        df["_norm_name"] = df["Nome"].astype(str).str.lower().str.strip()
+        df["_norm_city"] = df["Citta"].astype(str).str.lower().str.strip()
+        df = df.drop_duplicates(subset=["_norm_name", "_norm_city"], keep="first").drop(columns=["_norm_name", "_norm_city"])
+
+        # 5. Gestione Link: fallback reciproco tra Sito Web e Link Pagina
         if "Link Pagina" not in df.columns:
             df["Link Pagina"] = df.get("Sito Web", "")
         if "Sito Web" not in df.columns:
             df["Sito Web"] = df.get("Link Pagina", "")
-            
+
         df["Sito Web"] = df["Sito Web"].fillna("").astype(str)
         df["Link Pagina"] = df["Link Pagina"].fillna("").astype(str)
-        
-        # Se uno dei due è vuoto, copia l'altro
         df.loc[df["Sito Web"].str.strip() == "", "Sito Web"] = df["Link Pagina"]
         df.loc[df["Link Pagina"].str.strip() == "", "Link Pagina"] = df["Sito Web"]
-            
-        df["Esito Valutazione"] = ""
-        df["Note Commerciali"] = ""
-        
-        # Ordine desiderato delle colonne (con Regione se disponibile)
+
+        if "Esito Valutazione" not in df.columns:
+            df["Esito Valutazione"] = ""
+        if "Note Commerciali" not in df.columns:
+            df["Note Commerciali"] = ""
+
+        # 6. Ordine desiderato delle colonne V2
         desired_columns = [
-            "Nome", "Tipologia", "Regione", "Citta", "Indirizzo", "Telefono", 
-            "Email", "Sito Web", "Link Pagina", "Fonte", 
-            "Esito Valutazione", "Note Commerciali"
+            "Nome", "Tipologia", "Regione", "Provincia", "Citta", "Indirizzo",
+            "Telefono", "Email", "Sito Web", "Social", "Affinita Parmigiano",
+            "Partita IVA", "Anno Bilancio", "Fatturato", "Utile/Perdita", "Addetti",
+            "Link Pagina", "Fonte", "Esito Valutazione", "Note Commerciali"
         ]
         for col in desired_columns:
             if col not in df.columns:
                 df[col] = ""
+            else:
+                df[col] = df[col].fillna("").astype(str)
+
         df = df[desired_columns]
-        
-        # Salvataggio in Excel con gestione automatica file aperto/bloccato
+        # Ordina per Regione, Provincia, Tipologia, Nome
+        df = df.sort_values(by=["Regione", "Provincia", "Tipologia", "Nome"], ascending=True).reset_index(drop=True)
+
+        # 7. Salvataggio in Excel con foglio riepilogativo + fogli divisi per Provincia
         actual_output_path = output_path
         base, ext = os.path.splitext(output_path)
         counter = 1
-        
+
         while counter <= 10:
             try:
-                with pd.ExcelWriter(actual_output_path, engine='openpyxl') as writer:
-                    df.to_excel(writer, index=False, sheet_name='Leads Gastronomici')
-                    workbook = writer.book
-                    worksheet = writer.sheets['Leads Gastronomici']
-                    
-                    # Formattazione intestazione
-                    header_fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
-                    header_font = Font(color="FFFFFF", bold=True)
-                    
-                    for cell in worksheet[1]:
-                        cell.fill = header_fill
-                        cell.font = header_font
-                        cell.alignment = Alignment(horizontal="center", vertical="center")
-                        
-                    # Auto-adattamento larghezza colonne
-                    for column_cells in worksheet.columns:
-                        length = max(len(str(cell.value)) for cell in column_cells)
-                        col_letter = column_cells[0].column_letter
-                        worksheet.column_dimensions[col_letter].width = min(length + 2, 50) # max width 50
-                        
-                    # Data Validation (Menu a tendina per Esito Valutazione)
-                    val_col_idx = df.columns.get_loc("Esito Valutazione") + 1
-                    val_col_letter = get_column_letter(val_col_idx)
-                    
-                    dv = DataValidation(type="list", formula1='"Da contattare,Contattato,Scartato - Non in target"', allow_blank=True)
-                    worksheet.add_data_validation(dv)
-                    
-                    # Applica data validation alla colonna Esito
-                    dv.add(f"{val_col_letter}2:{val_col_letter}1048576")
-                    
+                with pd.ExcelWriter(actual_output_path, engine="openpyxl") as writer:
+                    # Foglio 1: Riepilogo Completo
+                    df.to_excel(writer, index=False, sheet_name="Tutti i Lead")
+                    self._style_worksheet(writer.sheets["Tutti i Lead"], df)
+
+                    # Fogli successivi: Divisione per Provincia
+                    if split_by_province:
+                        unique_provs = [p for p in df["Provincia"].unique() if str(p).strip()]
+                        for p_code in sorted(unique_provs):
+                            sub_df = df[df["Provincia"] == p_code].copy()
+                            p_full = CODE_TO_PROVINCE_NAME.get(p_code, "")
+                            # Nome tab max 31 caratteri per limite Excel
+                            tab_name = f"{p_code} - {p_full}"[:31] if p_full else f"Prov_{p_code}"[:31]
+                            tab_name = re.sub(r'[\\/*?:\[\]]', '', tab_name)
+                            sub_df.to_excel(writer, index=False, sheet_name=tab_name)
+                            self._style_worksheet(writer.sheets[tab_name], sub_df)
+
                 print(f"File salvato con successo in: {actual_output_path}")
                 return actual_output_path
             except PermissionError:

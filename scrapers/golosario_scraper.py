@@ -95,22 +95,24 @@ class GolosarioScraper(BaseScraper):
                         phones = re.findall(r'telefono["\s>:]*([0-9\s+-]{7,15})', inner_html, re.IGNORECASE)
                         phone = phones[0].strip() if phones else ""
                         
+                        from utils.geo_utils import extract_province
+                        prov = extract_province(city, address, region)
+                        
                         lead = {
                             "Nome": name,
                             "Tipologia": "Negozio / Gastronomia",
+                            "Regione": region,
+                            "Provincia": prov,
                             "Indirizzo": address,
                             "Citta": city,
                             "Telefono": phone,
                             "Email": "",
                             "Sito Web": website,
-                            "Link Pagina": website,
+                            "Link Pagina": website if website else url,
                             "Fonte": self.source_name
                         }
                         
-                        # Se il telefono manca, arricchisci con PhoneEnricher
-                        if not phone:
-                            lead = PhoneEnricher.enrich(lead, page)
-                            
+                        lead = PhoneEnricher.enrich(lead, page)
                         leads.append(lead)
                     except Exception as e:
                         pass
